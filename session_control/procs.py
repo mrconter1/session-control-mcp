@@ -101,6 +101,26 @@ def list_sessions() -> list[dict[str, Any]]:
     return sorted(out, key=lambda s: s.get("started") or "", reverse=True)
 
 
+def _find_wt() -> str | None:
+    """Locate wt.exe.
+
+    ``shutil.which`` alone is not enough: Windows Terminal ships as an App
+    Execution Alias in %LOCALAPPDATA%\\Microsoft\\WindowsApps, and that
+    directory is missing from PATH in some environments -- including the one
+    this server runs in, which is why spawns silently fell back to opening a
+    separate console window instead of a tab.
+    """
+    found = shutil.which("wt.exe") or shutil.which("wt")
+    if found:
+        return found
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        candidate = Path(local) / "Microsoft" / "WindowsApps" / "wt.exe"
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
 def _terminal_command(inner: str, title: str, working_dir: str) -> tuple[list[str], int]:
     """Wrap a command so it opens in a visible, persistent terminal.
 
@@ -114,9 +134,11 @@ def _terminal_command(inner: str, title: str, working_dir: str) -> tuple[list[st
       execute ``fork-test``. ``start`` is therefore not used at all; a window
       is requested with CREATE_NEW_CONSOLE and the directory via Popen's cwd.
     """
-    wt = shutil.which("wt.exe") or shutil.which("wt")
+    wt = _find_wt()
     if wt:
-        return ([wt, "new-tab", "--title", title, "-d", working_dir,
+        # -w 0 targets the current Windows Terminal window, so the session
+        # arrives as another tab rather than in a window of its own.
+        return ([wt, "-w", "0", "new-tab", "--title", title, "-d", working_dir,
                  "powershell", "-NoExit", "-Command", inner], DETACHED)
     safe_title = title.replace("'", "''")
     titled = f"$host.UI.RawUI.WindowTitle='{safe_title}'; {inner}"
