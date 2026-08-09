@@ -1,31 +1,18 @@
 # session-control-mcp
 
-Control Claude Code sessions from inside a Claude Code session: list them, open
-new ones, branch one off an existing transcript, close them, restart the current
-one.
-
-HTTP MCP server on `127.0.0.1:8767`. Installable through
-[mcp-orchestrator](https://github.com/mrconter1/mcp-orchestrator), which will
-start it hidden at logon and keep it running.
-
-## Safety
-
-These tools kill and spawn real processes. **Do not add them to the permission
-allowlist.** Every call is meant to prompt.
-
-Two guards, both tested:
-
-- `session_close` and `session_restart` refuse any pid that is not a live
-  `claude.exe`, so a stale or wrong pid fails closed instead of killing
-  something unrelated.
-- `session_new` rejects a non-existent working directory, and `fork` without
-  `resume`, since there would be nothing to fork from.
-
-This matters more than usual next to a task queue: forked agents run while
-nobody is watching, and an agent that can terminate its own runtime is not
-something to leave on a wildcard allow.
+Control Claude Code sessions from inside a session: list them, open new ones,
+branch off a transcript, close them, restart the current one.
 
 ## Install
+
+Via [mcp-orchestrator](https://github.com/mrconter1/mcp-orchestrator), which
+also keeps it running:
+
+```
+mcp_install("session")
+```
+
+Or by hand:
 
 ```powershell
 python -m venv .venv
@@ -34,59 +21,50 @@ python -m venv .venv
 claude mcp add --transport http --scope user session http://127.0.0.1:8767/mcp
 ```
 
-`SESSION_CONTROL_PORT` and `SESSION_CONTROL_HOST` override the defaults.
-
-Start it **before** launching Claude Code. An HTTP MCP server that is not
-listening when a session starts stays unavailable for that whole session
-([#31198](https://github.com/anthropics/claude-code/issues/31198)). Restarting a
-server that was already attached is fine; the client reconnects per call.
-
 ## Tools
 
 | Tool | Destructive | Purpose |
 | --- | --- | --- |
-| `session_list` | no | Every running session: pid, start time, cwd, owning terminal |
+| `session_list` | no | Every running session: pid, start time, cwd, terminal |
 | `session_info` | no | Server health |
-| `session_new` | no | Open a session in a new terminal; `resume` plus `fork` branches off an existing one |
+| `session_new` | no | Open a session; `resume` plus `fork` branches off an existing one |
 | `session_close` | **yes** | Terminate a session by pid |
-| `session_restart` | **yes** | Open a replacement resuming the same transcript, then kill the old one |
+| `session_restart` | **yes** | Replace a session, resuming the same transcript |
 
-## Three constraints worth knowing
+## Safety
 
-**A tool cannot kill its own caller and still return.** Terminating the session
-mid-call kills the turn before the result arrives. `session_restart` hands the
-kill to a detached helper on a delay, so the tool responds first and the session
-dies a couple of seconds later.
+**Do not put these on the permission allowlist.** Every call is meant to
+prompt. They kill and spawn real processes, and a forked agent runs while
+nobody is watching.
 
-**Restart is asymmetric.** The replacement opens in a new terminal window and
-the old window is left at a shell prompt. Claude Code is a TUI bound to its
-terminal, and a detached server cannot re-attach a fresh process to a window it
-does not own.
+Two guards, both tested: destructive tools refuse any pid that is not a live
+`claude.exe`, and `session_new` rejects a bad directory or a fork with nothing
+to fork from.
 
-**Pids cannot be mapped to session ids.** `claude.exe` carries no arguments
-linking a process to its transcript. Disambiguate by cwd, start time and
-terminal, and note that several sessions started from the same directory in the
-same Windows Terminal differ only by start time. Confirm the pid with the user
-before closing anything.
+## Worth knowing
 
-To find the calling session's own pid, walk the parent chain from a shell tool
-call: the shell's parent is the `claude.exe` that spawned it.
+- **A tool cannot kill its own caller and still return.** `session_restart`
+  hands the kill to a detached helper on a delay, so the tool answers first.
+- **Restart is asymmetric.** The replacement opens in a new terminal; the old
+  window is left at a shell prompt. Claude Code is a TUI bound to its terminal.
+- **Pids cannot be mapped to session ids.** `claude.exe` carries nothing
+  linking a process to its transcript. Disambiguate by cwd, start time and
+  terminal, and confirm with the user before closing anything.
+- **Start it before Claude Code.** A server that is not listening when a
+  session starts stays unavailable for that whole session
+  ([#31198](https://github.com/anthropics/claude-code/issues/31198)).
+  Restarting a server that was already attached is fine.
 
-## Windows notes
+Windows specifics, each of which cost a debugging round, are handled in
+`session_control/procs.py`: the `wt.exe` alias missing from PATH, Windows
+Terminal treating `;` as its own separator, `cmd /c start` eating its first
+token, `DETACHED_PROCESS` leaving a console app with no console, and session
+environment markers leaking into spawned sessions and disabling transcripts.
 
-Several traps are handled in `session_control/procs.py`, each of which cost a
-debugging round: `wt.exe` is an App Execution Alias missing from PATH, Windows
-Terminal parses `;` as its own separator, `cmd /c start` reads its first
-unquoted token as the program name, and `DETACHED_PROCESS` gives a console app
-no console so it dies invisibly. The session environment markers are also
-scrubbed before spawning, or the child treats itself as a child session and
-turns transcript saving off.
+Config: `SESSION_CONTROL_PORT`, `SESSION_CONTROL_HOST`.
 
 ## Status
 
-Verified: discovery across live sessions, both fail-closed guards at the module
-and MCP layers, argument validation, all five tools over HTTP, and Claude Code
-reporting the server connected.
-
-Not exercised end to end: an actual close or restart, left untested rather than
-killing a live session to prove a point.
+Verified: discovery, both fail-closed guards, argument validation, all five
+tools over HTTP. Not exercised end to end: an actual close or restart, left
+untested rather than killing a live session to prove a point.
