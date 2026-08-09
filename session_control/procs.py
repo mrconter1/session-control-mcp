@@ -48,6 +48,12 @@ def _clean_env() -> dict[str, str]:
     return env
 
 
+# Shells that host a session inside a terminal tab. Killing the session's shell
+# is what makes the tab close. WindowsTerminal.exe is deliberately absent: it
+# owns *every* tab, so terminating it would take the whole window down.
+SHELL_HOSTS = frozenset({"powershell.exe", "pwsh.exe", "cmd.exe"})
+
+
 class NotAClaudeProcess(Exception):
     """Raised when a PID is not a live Claude Code process."""
 
@@ -138,11 +144,13 @@ def _terminal_command(inner: str, title: str, working_dir: str) -> tuple[list[st
     if wt:
         # -w 0 targets the current Windows Terminal window, so the session
         # arrives as another tab rather than in a window of its own.
+        # No -NoExit: the hosting shell should exit when the session does, so
+        # the tab closes itself instead of lingering at a prompt.
         return ([wt, "-w", "0", "new-tab", "--title", title, "-d", working_dir,
-                 "powershell", "-NoExit", "-Command", inner], DETACHED)
+                 "powershell", "-Command", inner], DETACHED)
     safe_title = title.replace("'", "''")
     titled = f"$host.UI.RawUI.WindowTitle='{safe_title}'; {inner}"
-    return (["powershell.exe", "-NoExit", "-Command", titled], NEW_CONSOLE)
+    return (["powershell.exe", "-Command", titled], NEW_CONSOLE)
 
 
 def spawn_session(
@@ -187,17 +195,52 @@ def spawn_session(
     return {"launcher_pid": proc.pid, "cwd": str(working_dir), "command": " ".join(argv)}
 
 
-def close_session(pid: int, force: bool = False) -> dict[str, Any]:
-    """Terminate one Claude Code session."""
+def close_session(pid: int, force: bool = False, close_tab: bool = True) -> dict[str, Any]:
+    """Terminate one Claude Code session, and by default its terminal tab.
+
+    Killing ``claude.exe`` alone leaves the shell that launched it sitting at a
+    prompt, so the tab stays open. With ``close_tab`` the hosting shell is
+    terminated too and the tab goes away. Only a shell in ``SHELL_HOSTS`` is
+    ever touched, so a session launched from something else is left alone.
+
+    Pass ``close_tab=False`` to keep the shell -- useful when the session was
+    started from a terminal the user is still working in.
+    """
     proc = _proc(pid)
     described = _describe(proc)
+
+    host = None
+    if close_tab:
+        try:
+            candidate = psutil.Process(proc.ppid())
+            if candidate.name().lower() in SHELL_HOSTS:
+                host = candidate
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            host = None
+
     proc.kill() if force else proc.terminate()
     try:
         proc.wait(timeout=5)
         exited = True
     except psutil.TimeoutExpired:
         exited = False
-    return {**described, "exited": exited, "forced": force}
+
+    tab_closed = False
+    if host is not None:
+        try:
+            host.terminate()
+            host.wait(timeout=3)
+            tab_closed = True
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            tab_closed = False
+        except psutil.TimeoutExpired:
+            try:
+                host.kill()
+                tab_closed = True
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                tab_closed = False
+
+    return {**described, "exited": exited, "forced": force, "tab_closed": tab_closed}
 
 
 def schedule_kill(pid: int, delay_ms: int = 2000) -> int:

@@ -75,14 +75,18 @@ def session_new(
 
 
 @server.tool()
-def session_close(pid: int, force: bool = False) -> dict[str, Any]:
-    """Terminate a Claude Code session by pid. DESTRUCTIVE.
+def session_close(pid: int, force: bool = False, close_tab: bool = True) -> dict[str, Any]:
+    """Terminate a Claude Code session by pid, and its terminal tab. DESTRUCTIVE.
 
     Refuses any pid that is not a live claude.exe. Confirm the target with the
     user first -- an in-flight turn is lost.
+
+    close_tab also terminates the shell hosting the session, so the tab closes
+    instead of lingering at a prompt. Set it False to keep a shell the user is
+    still working in.
     """
     try:
-        return _ok(**procs.close_session(pid, force))
+        return _ok(**procs.close_session(pid, force, close_tab))
     except procs.NotAClaudeProcess as exc:
         return _err(str(exc))
 
@@ -97,9 +101,9 @@ def session_restart(
 ) -> dict[str, Any]:
     """Restart a session: open a replacement resuming session_id, then kill the old one.
 
-    DESTRUCTIVE and asymmetric -- the replacement opens in a NEW terminal
-    window; the old window is left at a shell prompt. Use this to pick up
-    changed settings or a newly started MCP server without losing the thread.
+    DESTRUCTIVE -- the replacement opens as a new tab in the current terminal
+    window, and the old tab closes once its session is killed. Use this to pick
+    up changed settings or a newly started MCP server without losing the thread.
 
     The kill is delayed and detached so this tool can return before its own
     caller dies.
