@@ -20,6 +20,9 @@ CLAUDE_EXE = "claude.exe"
 
 # Detach spawned terminals so they outlive this server.
 DETACHED = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+# A console app needs a console of its own; DETACHED_PROCESS gives it none, so
+# anything launched without a terminal wrapper has to ask for a new window.
+NEW_CONSOLE = 0x00000010 | 0x00000200  # CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP
 
 
 class NotAClaudeProcess(Exception):
@@ -75,12 +78,26 @@ def list_sessions() -> list[dict[str, Any]]:
     return sorted(out, key=lambda s: s.get("started") or "", reverse=True)
 
 
-def _terminal_command(inner: str, title: str) -> list[str]:
-    """Wrap a command so it opens in a visible, persistent terminal."""
+def _terminal_command(inner: str, title: str, working_dir: str) -> tuple[list[str], int]:
+    """Wrap a command so it opens in a visible, persistent terminal.
+
+    Returns ``(argv, creationflags)``. Two Windows traps are avoided here:
+
+    * Windows Terminal parses ``;`` as its own command separator, so ``inner``
+      must never contain one -- the directory comes from wt's ``-d`` flag
+      rather than from a ``Set-Location`` prefix.
+    * ``cmd /c start`` reads its first *unquoted* token as the program to run,
+      not as a window title, so ``start fork-test powershell ...`` tries to
+      execute ``fork-test``. ``start`` is therefore not used at all; a window
+      is requested with CREATE_NEW_CONSOLE and the directory via Popen's cwd.
+    """
     wt = shutil.which("wt.exe") or shutil.which("wt")
     if wt:
-        return [wt, "new-tab", "--title", title, "powershell", "-NoExit", "-Command", inner]
-    return ["cmd.exe", "/c", "start", title, "powershell", "-NoExit", "-Command", inner]
+        return ([wt, "new-tab", "--title", title, "-d", working_dir,
+                 "powershell", "-NoExit", "-Command", inner], DETACHED)
+    safe_title = title.replace("'", "''")
+    titled = f"$host.UI.RawUI.WindowTitle='{safe_title}'; {inner}"
+    return (["powershell.exe", "-NoExit", "-Command", titled], NEW_CONSOLE)
 
 
 def spawn_session(
@@ -112,11 +129,13 @@ def spawn_session(
     if name:
         argv += ["--name", name]
 
-    inner = f"Set-Location '{working_dir}'; {' '.join(argv)}"
+    inner = " ".join(argv)
     title = name or ("claude-fork" if fork else "claude")
+    term_argv, flags = _terminal_command(inner, title, str(working_dir))
     proc = subprocess.Popen(  # noqa: S603 -- argv is built from validated parts
-        _terminal_command(inner, title),
-        creationflags=DETACHED,
+        term_argv,
+        cwd=str(working_dir),
+        creationflags=flags,
         close_fds=True,
     )
     return {"launcher_pid": proc.pid, "cwd": str(working_dir), "command": " ".join(argv)}
