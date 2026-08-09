@@ -270,12 +270,89 @@ def close_session(pid: int, force: bool = False, close_tab: bool = True) -> dict
     }
 
 
+def replace_session(
+    pid: int,
+    session_id: str,
+    cwd: str | None = None,
+    remote_control: bool = False,
+    delay_ms: int = 2500,
+) -> dict[str, Any]:
+    """Kill a session, then open its replacement, from one detached helper.
+
+    The order matters and was learned the hard way. Spawning first left the old
+    and new sessions alive at the same time, and because a resumed session
+    keeps its id, two workers claimed one session id: Remote Control evicted
+    one of them and ``/rc`` failed in the new tab with code 4090.
+
+    The cost is a window where neither session exists. If the spawn fails the
+    transcript is still on disk and ``claude --resume <id>`` brings it back,
+    which is the better trade.
+    """
+    _proc(pid)  # validate before scheduling; fail closed on a bad pid
+    working_dir = Path(cwd).expanduser() if cwd else Path.home()
+    if not working_dir.is_dir():
+        working_dir = Path.home()
+
+    argv = ["claude", "--resume", session_id]
+    if remote_control:
+        argv.append("--remote-control")
+    inner = " ".join(argv)
+
+    steps = [
+        f"Start-Sleep -Milliseconds {int(delay_ms)}",
+        f"Stop-Process -Id {int(pid)} -Force -ErrorAction SilentlyContinue",
+        # Give the old worker's socket time to close before the replacement
+        # claims the same session id, or the eviction happens the other way.
+        "Start-Sleep -Milliseconds 1200",
+    ]
+
+    wt = _find_wt()
+    if wt:
+        steps.append(
+            f"& {_ps_quote(wt)} -w 0 new-tab --title claude -d {_ps_quote(str(working_dir))} "
+            f"powershell -Command {_ps_quote(_exit_zero(inner))}"
+        )
+    else:
+        steps.append(
+            f"Start-Process powershell.exe -WorkingDirectory {_ps_quote(str(working_dir))} "
+            f"-ArgumentList '-Command',{_ps_quote(_exit_zero(inner))}"
+        )
+
+    helper = subprocess.Popen(  # noqa: S603 -- every interpolated value is quoted
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "; ".join(steps)],
+        cwd=str(working_dir),
+        env=_clean_env(),
+        creationflags=DETACHED,
+        close_fds=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return {
+        "helper_pid": helper.pid,
+        "killing_pid": pid,
+        "cwd": str(working_dir),
+        "command": inner,
+        "order": "kill the old session, pause, then open the replacement",
+    }
+
+
+def _ps_quote(value: str) -> str:
+    """Single-quote a value for PowerShell, doubling any quote inside it."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
 def schedule_kill(pid: int, delay_ms: int = 2000) -> int:
     """Kill ``pid`` after a delay, from a detached helper.
 
-    A tool cannot terminate its own caller and still return a result -- the
-    turn dies mid-call. So the kill is handed to a process that outlives this
-    one, letting the tool respond first.
+    A tool cannot terminate its own caller and still return a result, the turn
+    dies mid-call. So the kill is handed to a process that outlives this one,
+    letting the tool respond first.
+
+    The hosting shell is deliberately left alone. Terminating it gives it a
+    non-zero exit code, and Windows Terminal's default ``closeOnExit=graceful``
+    then keeps the tab open showing "[process exited with code ...]", which is
+    worse than the prompt it would otherwise show. A shell this server spawned
+    exits 0 by itself once its session dies, and the tab closes on that.
     """
     _proc(pid)  # validate before scheduling; fail closed on a bad pid
     script = f"Start-Sleep -Milliseconds {int(delay_ms)}; Stop-Process -Id {int(pid)} -Force"

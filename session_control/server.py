@@ -99,26 +99,31 @@ def session_restart(
     remote_control: bool = False,
     delay_ms: int = 2500,
 ) -> dict[str, Any]:
-    """Restart a session: open a replacement resuming session_id, then kill the old one.
+    """Restart a session: kill it, then open a replacement resuming session_id.
 
-    DESTRUCTIVE -- the replacement opens as a new tab in the current terminal
-    window, and the old tab closes once its session is killed. Use this to pick
-    up changed settings or a newly started MCP server without losing the thread.
+    DESTRUCTIVE. The old session is killed first and the replacement opens as a
+    new tab a moment later. Use this to pick up changed settings or a newly
+    started MCP server without losing the thread.
 
-    The kill is delayed and detached so this tool can return before its own
-    caller dies.
+    Killing first is deliberate. A resumed session keeps its id, so overlapping
+    the two means two workers claim one session id and Remote Control evicts
+    one, leaving /rc broken in the new tab. Both steps run in a detached helper
+    so this tool can return before its own caller dies.
+
+    Whether the old tab closes depends on how it was started. A tab this server
+    opened exits cleanly and closes itself; a tab started by hand returns to a
+    shell prompt and stays.
     """
     try:
-        spawned = procs.spawn_session(cwd, resume=session_id, fork=False, remote_control=remote_control)
-        killer = procs.schedule_kill(claude_pid, delay_ms)
+        result = procs.replace_session(
+            claude_pid, session_id, cwd=cwd, remote_control=remote_control, delay_ms=delay_ms
+        )
     except (procs.NotAClaudeProcess, ValueError, OSError) as exc:
         return _err(str(exc))
     return _ok(
-        replacement=spawned,
-        killing_pid=claude_pid,
-        killer_pid=killer,
+        **result,
         delay_ms=delay_ms,
-        note="Replacement opens in a new terminal; this session dies shortly.",
+        note="This session dies shortly, then the replacement opens in a new tab.",
     )
 
 
