@@ -8,6 +8,7 @@ unrelated process.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,28 @@ DETACHED = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROU
 # A console app needs a console of its own; DETACHED_PROCESS gives it none, so
 # anything launched without a terminal wrapper has to ask for a new window.
 NEW_CONSOLE = 0x00000010 | 0x00000200  # CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP
+
+
+# Markers Claude Code exports inside a live session. This server is itself
+# started from a session, so without scrubbing they reach the claude we spawn --
+# which then treats itself as a *child* session and silently turns transcript
+# saving off, leaving the new session impossible to resume later.
+SESSION_ENV_MARKERS = (
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_PID",
+    "CLAUDECODE",
+)
+
+
+def _clean_env() -> dict[str, str]:
+    """A copy of the environment with this session's markers removed."""
+    env = os.environ.copy()
+    for key in SESSION_ENV_MARKERS:
+        env.pop(key, None)
+    return env
 
 
 class NotAClaudeProcess(Exception):
@@ -135,6 +158,7 @@ def spawn_session(
     proc = subprocess.Popen(  # noqa: S603 -- argv is built from validated parts
         term_argv,
         cwd=str(working_dir),
+        env=_clean_env(),
         creationflags=flags,
         close_fds=True,
     )
