@@ -127,6 +127,21 @@ def _find_wt() -> str | None:
     return None
 
 
+def _exit_zero(inner: str) -> str:
+    """Wrap a command so its shell exits 0 however the command ends.
+
+    Windows Terminal's default ``closeOnExit`` is ``graceful``: the tab closes
+    only when the process exits with code 0. A session that is killed (or that
+    exits non-zero for any reason) would otherwise leave the tab sitting on
+    ``[process exited with code ...]``.
+
+    ``try{...}finally{...}`` is used rather than ``...; exit 0`` because a
+    command string handed to wt must not contain a semicolon -- wt would read
+    it as its own subcommand separator.
+    """
+    return f"try{{{inner}}}finally{{exit 0}}"
+
+
 def _terminal_command(inner: str, title: str, working_dir: str) -> tuple[list[str], int]:
     """Wrap a command so it opens in a visible, persistent terminal.
 
@@ -144,12 +159,13 @@ def _terminal_command(inner: str, title: str, working_dir: str) -> tuple[list[st
     if wt:
         # -w 0 targets the current Windows Terminal window, so the session
         # arrives as another tab rather than in a window of its own.
-        # No -NoExit: the hosting shell should exit when the session does, so
-        # the tab closes itself instead of lingering at a prompt.
+        # No -NoExit, and _exit_zero so the shell reports success: Windows
+        # Terminal's default closeOnExit is "graceful", which closes the tab
+        # only on exit code 0.
         return ([wt, "-w", "0", "new-tab", "--title", title, "-d", working_dir,
-                 "powershell", "-Command", inner], DETACHED)
+                 "powershell", "-Command", _exit_zero(inner)], DETACHED)
     safe_title = title.replace("'", "''")
-    titled = f"$host.UI.RawUI.WindowTitle='{safe_title}'; {inner}"
+    titled = f"$host.UI.RawUI.WindowTitle='{safe_title}'; {_exit_zero(inner)}"
     return (["powershell.exe", "-Command", titled], NEW_CONSOLE)
 
 
@@ -225,22 +241,33 @@ def close_session(pid: int, force: bool = False, close_tab: bool = True) -> dict
     except psutil.TimeoutExpired:
         exited = False
 
-    tab_closed = False
+    # Do NOT kill the host shell to close the tab. Terminating it gives it a
+    # non-zero exit code, and closeOnExit=graceful then keeps the tab open on
+    # "[process exited with code ...]" -- the opposite of what is wanted. A
+    # shell spawned by this server ends with exit 0 by itself once its session
+    # dies, and Windows Terminal closes the tab on that.
+    host_exit = None
     if host is not None:
         try:
-            host.terminate()
-            host.wait(timeout=3)
-            tab_closed = True
-        except (psutil.AccessDenied, psutil.NoSuchProcess):
-            tab_closed = False
+            host_exit = host.wait(timeout=5)
         except psutil.TimeoutExpired:
-            try:
-                host.kill()
-                tab_closed = True
-            except (psutil.AccessDenied, psutil.NoSuchProcess):
-                tab_closed = False
+            # Not one of ours (a shell started with -NoExit, say). Leave it be
+            # unless asked to clean it up; killing it will not close the tab.
+            if close_tab:
+                try:
+                    host.terminate()
+                except (psutil.AccessDenied, psutil.NoSuchProcess):
+                    pass
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            host_exit = None
 
-    return {**described, "exited": exited, "forced": force, "tab_closed": tab_closed}
+    return {
+        **described,
+        "exited": exited,
+        "forced": force,
+        "host_exit_code": host_exit,
+        "tab_closed": host_exit == 0,
+    }
 
 
 def schedule_kill(pid: int, delay_ms: int = 2000) -> int:
