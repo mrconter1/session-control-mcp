@@ -13,6 +13,7 @@ shell's parent chain (its PowerShell tool runs as a child of claude.exe).
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any
 
@@ -135,7 +136,16 @@ def session_info() -> dict[str, Any]:
 
 def main() -> None:
     print(f"session-control-mcp listening on http://{HOST}:{PORT}/mcp")
-    server.run(transport="streamable-http", host=HOST, port=PORT)
+    # The selector loop, not ``server.run``: Python's default Windows loop, the
+    # Proactor, closes its listening socket when a client resets a connection
+    # before the accept completes (WinError 64), and the process then lives on
+    # answering nothing. That killed this server on every Claude Code session
+    # churn for a month. The selector loop drops the aborted connection and
+    # carries on; nothing here needs the Proactor (no asyncio subprocesses).
+    asyncio.run(
+        server.run_streamable_http_async(host=HOST, port=PORT),
+        loop_factory=asyncio.SelectorEventLoop,
+    )
 
 
 if __name__ == "__main__":
