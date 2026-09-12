@@ -24,6 +24,12 @@ DETACHED = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROU
 # A console app needs a console of its own; DETACHED_PROCESS gives it none, so
 # anything launched without a terminal wrapper has to ask for a new window.
 NEW_CONSOLE = 0x00000010 | 0x00000200  # CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP
+# For a helper that must run unseen: a console, just not a visible one. The same
+# rule applies as above -- DETACHED_PROCESS gives powershell.exe no console at
+# all, so it reports a pid, exits 0 and never executes a line. Measured: a
+# detached helper's side effect never happened; the same script under
+# CREATE_NO_WINDOW ran every time.
+HELPER = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
 
 
 # Markers Claude Code exports inside a live session. This server is itself
@@ -322,7 +328,7 @@ def replace_session(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "; ".join(steps)],
         cwd=str(working_dir),
         env=_clean_env(),
-        creationflags=DETACHED,
+        creationflags=HELPER,
         close_fds=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -358,7 +364,7 @@ def schedule_kill(pid: int, delay_ms: int = 2000) -> int:
     script = f"Start-Sleep -Milliseconds {int(delay_ms)}; Stop-Process -Id {int(pid)} -Force"
     helper = subprocess.Popen(  # noqa: S603
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-        creationflags=DETACHED,
+        creationflags=HELPER,
         close_fds=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
