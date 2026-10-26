@@ -68,3 +68,14 @@ Config: `SESSION_CONTROL_PORT`, `SESSION_CONTROL_HOST`.
 Verified: discovery, both fail-closed guards, argument validation, all five
 tools over HTTP. Not exercised end to end: an actual close or restart, left
 untested rather than killing a live session to prove a point.
+
+## Optional bearer token on /mcp
+
+Set `MCP_SESSION_TOKEN_FILE` to a file path to lock the `/mcp` endpoint to callers that
+send `Authorization: Bearer <token>` with a local Host. The file holds the
+token DPAPI-encrypted for the current Windows user and is created on first
+start if missing; a file that exists but cannot be decrypted locks the
+endpoint (503). Unset, the server behaves exactly as before. Claude Code sends
+the header through a `headersHelper` that decrypts the same file, so the
+token never sits in plain text in `~/.claude.json`. Same design as the
+orchestrator's `guard.py`.
